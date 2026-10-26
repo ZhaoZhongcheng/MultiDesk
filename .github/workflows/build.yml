@@ -1,0 +1,33 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (Release) + unit tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The project targets .NET Framework 4.8 and builds with the in-box MSBuild
+      # (%WINDIR%\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe), so no .NET SDK,
+      # Visual Studio or NuGet restore is required.
+      - name: Build Release and run unit tests
+        shell: pwsh
+        run: .\build.ps1 -Release -Tests
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiDesk-exe
+          path: src/bin/Release/MultiDesk.exe
+          if-no-files-found: error

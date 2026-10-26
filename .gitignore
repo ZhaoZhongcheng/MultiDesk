@@ -1,0 +1,38 @@
+# ============================================================
+# MultiDesk - Git ignore rules
+# ============================================================
+
+# ---- Build outputs ----
+[Bb]in/
+[Oo]bj/
+dist/
+*.zip
+*.pdb
+*.binlog
+*.nupkg
+
+# ---- Visual Studio / MSBuild user files ----
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.log
+
+# ---- Runtime data (portable mode, user-private) ----
+MultiDesk-data/
+config.json
+config.json.bak
+config.json.tmp
+session.json
+crash.log
+
+# ---- Generated launchers / shortcuts (publish.ps1) ----
+*.lnk
+
+# ---- OS junk ----
+Thumbs.db
+desktop.ini
+
+# ---- Screenshots: kept locally for development / verification only ----
+screenshots/

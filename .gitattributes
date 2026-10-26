@@ -1,0 +1,21 @@
+# Normalize text files in the repository; check out with native line endings.
+* text=auto
+
+*.cs        text diff=csharp
+*.csproj    text
+*.xaml      text
+*.manifest  text
+*.md        text
+*.txt       text
+*.ps1       text
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.sln       text eol=crlf
+*.yml       text
+
+# Binary assets (Git must never try to diff/normalize these)
+*.png       binary
+*.ico       binary
+*.lnk       binary
+*.zip       binary
+*.exe       binary

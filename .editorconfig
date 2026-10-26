@@ -1,0 +1,26 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# C# 源文件需要 UTF-8 with BOM：项目使用系统自带旧版 C# 编译器，
+# 无 BOM 时会按 ANSI 读取，导致中文注释/字符串乱码（见 build.ps1）。
+[*.cs]
+indent_style = space
+indent_size = 4
+charset = utf-8-bom
+
+[*.{csproj,xaml,manifest,config}]
+indent_style = space
+indent_size = 2
+
+[*.{md,yml,yaml}]
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+[*.{bat,cmd}]
+end_of_line = crlf

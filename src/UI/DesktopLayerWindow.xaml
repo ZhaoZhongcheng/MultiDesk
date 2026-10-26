@@ -1,0 +1,107 @@
+<Window x:Class="MultiDesk.UI.DesktopLayerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MultiDesk 桌面图层"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        WindowStartupLocation="Manual"
+        AllowsTransparency="True"
+        Background="#01000000"
+        FontFamily="Microsoft YaHei UI"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        AllowDrop="True"
+        Focusable="False"
+        IsTabStop="False">
+
+    <!--
+        全屏桌面图层（1.1.0 起为 AllowsTransparency 透明窗口）：
+        * 壁纸模式「系统壁纸」+ 有桌面操作权限（正常 Medium 启动）：WallpaperLayer 不绘制内容，
+          直接透出真实桌面（Wallpaper Engine 等动态壁纸也能透出）；
+        * 壁纸模式「系统壁纸」+ 受限启动（Low IL/沙箱，无法隐藏真实桌面图标）：
+          用 WallpaperService 读取注册表系统壁纸并绘制为不透明背景，避免真实图标与程序图标重复；
+        * 图片/纯色模式：始终由 WallpaperService 绘制全屏矩形（5 种填充）。
+        窗口 Background 使用近乎全透明的 #01000000，保证透明区域仍能接收鼠标输入。
+        层级（自下而上）：壁纸 → 图标 → 徽章 → 拖入提示 → OSD/Toast → 右键菜单
+    -->
+    <Grid x:Name="RootGrid" Background="Transparent" ClipToBounds="True">
+
+        <!-- ============ 壁纸层（代码根据壁纸模式/权限决定是否绘制） ============ -->
+        <Grid x:Name="WallpaperLayer" IsHitTestVisible="False">
+            <!-- 受限模式下图片模式为 Fit/Center 时的暗色底，避免露出真实桌面图标 -->
+            <Border x:Name="WallpaperBase" Background="#FF0B0D12" Visibility="Collapsed" />
+            <Rectangle x:Name="WallpaperImage" />
+        </Grid>
+
+        <!-- ============ 图标层（代码中动态创建图标元素，坐标来自 IconEntry） ============ -->
+        <Canvas x:Name="IconCanvas" Background="Transparent" ClipToBounds="True" />
+
+        <!-- ============ 桌面名徽章（右下角、任务栏上方约 40 DIP） ============ -->
+        <Border x:Name="NameBadge"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Bottom"
+                Margin="0,0,18,80"
+                Background="#B3121720"
+                BorderBrush="#26FFFFFF"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="14,6"
+                Visibility="Collapsed"
+                IsHitTestVisible="False">
+            <TextBlock x:Name="NameBadgeText"
+                       FontSize="13"
+                       Foreground="#FFF2F5FA" />
+        </Border>
+
+        <!-- ============ 从资源管理器拖入文件时的高亮提示 ============ -->
+        <Border x:Name="DropHighlight"
+                BorderBrush="#996FA8FF"
+                BorderThickness="3"
+                Background="#0D5B8DEF"
+                CornerRadius="3"
+                Visibility="Collapsed"
+                IsHitTestVisible="False" />
+
+        <!-- ============ 覆盖层：OSD 与 Toast（均不接收鼠标） ============ -->
+        <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False" Background="{x:Null}">
+            <!-- 错误提示 Toast：默认显示 3 秒 -->
+            <Border x:Name="ToastBorder"
+                    Visibility="Collapsed"
+                    Opacity="0"
+                    Background="#E6141A26"
+                    BorderBrush="#33FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Padding="18,10"
+                    MaxWidth="640">
+                <TextBlock x:Name="ToastText"
+                           FontSize="13"
+                           Foreground="#FFF1F5FA"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center" />
+            </Border>
+
+            <!-- 切换桌面 OSD：屏幕中下方的大号桌面名 -->
+            <Border x:Name="OsdBorder"
+                    Visibility="Collapsed"
+                    Opacity="0"
+                    Background="#D9141A26"
+                    BorderBrush="#33FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="18"
+                    Padding="34,14">
+                <TextBlock x:Name="OsdText"
+                           FontSize="28"
+                           FontWeight="SemiBold"
+                           Foreground="#FFF7FAFF"
+                           TextAlignment="Center"
+                           TextTrimming="CharacterEllipsis" />
+            </Border>
+        </Canvas>
+
+        <!-- ============ 右键菜单覆盖层（全窗口透明遮罩，点击空白处先关闭菜单） ============ -->
+        <Canvas x:Name="MenuLayer" Background="Transparent" Visibility="Collapsed" />
+    </Grid>
+</Window>

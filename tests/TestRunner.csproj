@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{7C3D1F2A-5B8E-4A61-9C2D-0E4F6A8B1D23}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>MultiDesk.Tests</RootNamespace>
+    <AssemblyName>TestRunner</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+    <CodePage>65001</CodePage>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <WarningLevel>4</WarningLevel>
+    <ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>None</ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>
+    <GenerateSerializationAssemblies>Off</GenerateSerializationAssemblies>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System.Xaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compile the core logic sources directly so internal behaviour is testable.
+         AppController and SelfTest are integration layers (WPF windows / Win32 interop)
+         and are compiled by src\MultiDesk.csproj only. -->
+    <Compile Include="..\src\Core\**\*.cs" Exclude="..\src\Core\AppController.cs;..\src\Core\SelfTest.cs" />
+    <!-- Pure helper used by the core (integrity probing) - no UI dependency. -->
+    <Compile Include="..\src\Native\ProcessIntegrity.cs" />
+    <!-- Desktop shell helpers + real-Windows icon metrics (Win32 only, no WPF/UI dependency). -->
+    <Compile Include="..\src\Native\DesktopShell.cs" />
+    <Compile Include="..\src\Native\WindowsDesktopMetrics.cs" />
+    <!-- Test runner + test cases. -->
+    <Compile Include="*.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
