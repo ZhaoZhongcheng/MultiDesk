@@ -1,5 +1,6 @@
 # 多桌面助手 MultiDesk
 
+[![Build & Test](https://github.com/ZhaoZhongcheng/MultiDesk/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ZhaoZhongcheng/MultiDesk/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6)
 ![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4)
