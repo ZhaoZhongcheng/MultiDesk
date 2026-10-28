@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
 using MultiDesk.Core;
@@ -48,6 +49,9 @@ namespace MultiDesk
         private IconMetrics _layoutMetrics;
         private DesktopIconViewManager _desktopIcons;
         private DispatcherTimer _iconGuardTimer;
+        private DispatcherTimer _watchdogTimer;
+        private bool _metricsRefreshScheduled;
+        private bool _metricsResolvedOnce;
 
         public event EventHandler CurrentDesktopChanged;
         public event EventHandler ConfigChanged;
@@ -65,6 +69,9 @@ namespace MultiDesk
             Directory.CreateDirectory(_dataDir);
             _journalPath = Path.Combine(_dataDir, "session.json");
             _markerPath = Path.Combine(_dataDir, DesktopIconViewManager.MarkerFileName);
+            try { IconService.Configure(_dataDir); }
+            catch { }
+            StartupProfiler.Mark("controller_ctor_begin");
 
             try
             {
@@ -110,9 +117,8 @@ namespace MultiDesk
                     }
                 }
             }
-            try { _store.Save(_config); }
-            catch (Exception ex) { Log("save config failed: " + ex.Message); }
-
+            // 1.2.8：启动阶段不再立即写配置（冷机登录风暴期每次写盘都是额外 IO），
+            // 统一在 Start() 完成初始化后保存一次。
             RestoreShellWindowsOnce();
 
             if (!_uiOnly)
@@ -166,12 +172,23 @@ namespace MultiDesk
             {
                 Log("sync autostart failed: " + ex.Message);
             }
+
+            IconMetrics cachedMetrics = _layoutMetrics;
+            if (cachedMetrics != null)
+            {
+                StartupProfiler.Mark("controller_ctor_done", "iconSize=" + cachedMetrics.IconSize);
+            }
+            else
+            {
+                StartupProfiler.Mark("controller_ctor_done");
+            }
         }
 
         // ---------------- 启动 / 关闭 ----------------
 
         public void Start()
         {
+            StartupProfiler.Mark("start_begin");
             Log("starting: uiOnly=" + _uiOnly + " dataDir=" + _dataDir + " desktops=" + _config.Desktops.Count
                 + " fresh=" + _freshConfig + " active=" + _config.ActiveDesktopId);
 
@@ -180,53 +197,16 @@ namespace MultiDesk
                 int recovered = _engine.RecoverFromPreviousSession();
                 if (recovered > 0) Log("recovered " + recovered + " leftover hidden window(s) from previous session");
             }
+            StartupProfiler.Mark("session_recovered");
 
-            // 隐藏系统真实桌面图标，避免与程序图层图标重复（退出/崩溃恢复由 marker + 看门狗处理）
-            try
-            {
-                _desktopIntegrationAvailable = !ProcessIntegrity.IsLowIntegrity();
-                if (!_desktopIntegrationAvailable)
-                {
-                    Log("running at LOW integrity: system desktop icon hiding and native desktop menu are unavailable (restricted launch)");
-                }
-                _desktopIcons = new DesktopIconViewManager(_markerPath, Log);
-                bool hidden = _desktopIntegrationAvailable && _desktopIcons.Hide();
-                if (hidden) Log("system desktop icons hidden");
-            }
-            catch (Exception ex)
-            {
-                Log("hide system desktop icons failed: " + ex.Message);
-            }
-
-            // 桌面图层窗口（全屏、最底层）
-            try
-            {
-                DesktopLayerWindow layerWindow = new DesktopLayerWindow(this);
-                _layer = layerWindow;
-                layerWindow.Show();
-            }
-            catch (Exception ex)
-            {
-                Log("create desktop layer failed: " + ex.Message);
-            }
-
-            if (_engine != null)
-            {
-                _engine.SetWindowIsolation(_config.Options != null && _config.Options.IsolateWindows);
-                _engine.Initialize(CurrentDesktop == null ? _config.ActiveDesktopId : CurrentDesktop.Id);
-                _engine.SetAlwaysVisibleProcesses(_config.Options == null ? null : _config.Options.AlwaysVisibleProcesses);
-                _tickTimer = new DispatcherTimer(DispatcherPriority.Background);
-                _tickTimer.Interval = TimeSpan.FromMilliseconds(400);
-                _tickTimer.Tick += OnTick;
-                _tickTimer.Start();
-                SpawnWatchdog();
-            }
-
+            // 1.2.8 启动顺序优化：先创建托盘图标与全局热键，让用户立刻看到「程序已启动」，
+            // 再做隐藏真实桌面图标 / 创建桌面图层 / 引擎初始化等重活。
             if (!_uiOnly)
             {
                 try
                 {
                     _tray = new TrayIcon(this);
+                    StartupProfiler.Mark("tray_created");
                 }
                 catch (Exception ex)
                 {
@@ -246,10 +226,56 @@ namespace MultiDesk
                 _hotkeys.RestoreAllRequested += RestoreAllWindows;
                 _hotkeys.Register();
                 Log("hotkeys: " + _hotkeys.Report);
+                StartupProfiler.Mark("hotkeys_registered");
             }
             catch (Exception ex)
             {
                 Log("register hotkeys failed: " + ex.Message);
+            }
+
+            // 隐藏系统真实桌面图标，避免与程序图层图标重复（退出/崩溃恢复由 marker + 看门狗处理）
+            try
+            {
+                _desktopIntegrationAvailable = !ProcessIntegrity.IsLowIntegrity();
+                if (!_desktopIntegrationAvailable)
+                {
+                    Log("running at LOW integrity: system desktop icon hiding and native desktop menu are unavailable (restricted launch)");
+                }
+                _desktopIcons = new DesktopIconViewManager(_markerPath, Log);
+                bool hidden = _desktopIntegrationAvailable && _desktopIcons.Hide();
+                if (hidden) Log("system desktop icons hidden");
+            }
+            catch (Exception ex)
+            {
+                Log("hide system desktop icons failed: " + ex.Message);
+            }
+            StartupProfiler.Mark("desktop_icons_hidden");
+
+            // 桌面图层窗口（全屏、最底层）。1.2.8 起图标优先从磁盘缓存同步绘制，
+            // 未命中项先在后台提取、完成后再回填，不再阻塞启动。
+            try
+            {
+                DesktopLayerWindow layerWindow = new DesktopLayerWindow(this);
+                StartupProfiler.Mark("layer_created");
+                _layer = layerWindow;
+                layerWindow.Show();
+                StartupProfiler.Mark("layer_shown");
+            }
+            catch (Exception ex)
+            {
+                Log("create desktop layer failed: " + ex.Message);
+            }
+
+            if (_engine != null)
+            {
+                _engine.SetWindowIsolation(_config.Options != null && _config.Options.IsolateWindows);
+                _engine.Initialize(CurrentDesktop == null ? _config.ActiveDesktopId : CurrentDesktop.Id);
+                _engine.SetAlwaysVisibleProcesses(_config.Options == null ? null : _config.Options.AlwaysVisibleProcesses);
+                _tickTimer = new DispatcherTimer(DispatcherPriority.Background);
+                _tickTimer.Interval = TimeSpan.FromMilliseconds(400);
+                _tickTimer.Tick += OnTick;
+                _tickTimer.Start();
+                StartupProfiler.Mark("engine_initialized");
             }
 
             // 资源管理器重启后图标视图会重新出现，定时确保隐藏
@@ -266,6 +292,21 @@ namespace MultiDesk
                 _tray.ShowBalloon("受限启动模式（功能受限）",
                     "当前程序以受限权限（聊天窗口/沙箱）运行：动态壁纸、原生右键菜单、图标与真实桌面一致等功能不可用。可右键本托盘图标 →「以完整权限重启（推荐）」；建议以后从桌面快捷方式启动。");
             }
+            StartupProfiler.Mark("restricted_prompt_done");
+
+            // 1.2.8：看门狗（第二个进程）延后 3 秒启动，避开登录瞬间的磁盘/CPU 风暴；
+            // 主进程崩溃时仍由 marker/会话日志在下次启动恢复，保护窗口只有几秒空档。
+            ScheduleWatchdogStart();
+            StartupProfiler.Mark("watchdog_scheduled");
+
+            // 启动阶段不写配置；这里统一保存一次（布局规整 / 首次导入 / 度量缓存更新结果）。
+            try { _store.Save(_config); }
+            catch (Exception ex) { Log("save config failed: " + ex.Message); }
+            StartupProfiler.Mark("config_saved");
+
+            // 后台任务：刷新 Windows 图标度量缓存（供下次启动直接用）、清理过期图标缓存。
+            RefreshWindowsMetricsInBackground();
+            IconService.PruneDiskCacheAsync();
 
             if (_uiOnly)
             {
@@ -273,7 +314,16 @@ namespace MultiDesk
             }
             else if (_freshConfig)
             {
-                OpenSettings();
+                // 1.2.8：首次运行打开设置窗口会同步加载图标列表；延迟 1.2 秒，
+                // 让后台图标提取先填充缓存，避免首次启动被设置页拖慢（只发生一次）。
+                DispatcherTimer openSettingsTimer = new DispatcherTimer(DispatcherPriority.Background);
+                openSettingsTimer.Interval = TimeSpan.FromSeconds(1.2);
+                openSettingsTimer.Tick += delegate
+                {
+                    openSettingsTimer.Stop();
+                    OpenSettings();
+                };
+                openSettingsTimer.Start();
             }
 
             StartAutoSwitch();
@@ -290,6 +340,9 @@ namespace MultiDesk
                 };
                 _exitTimer.Start();
             }
+
+            StartupProfiler.Mark("start_done");
+            StartupProfiler.Flush();
         }
 
         public void Shutdown()
@@ -300,6 +353,7 @@ namespace MultiDesk
             try { if (_tickTimer != null) _tickTimer.Stop(); } catch { }
             try { if (_exitTimer != null) _exitTimer.Stop(); } catch { }
             try { if (_iconGuardTimer != null) { _iconGuardTimer.Stop(); _iconGuardTimer = null; } } catch { }
+            try { if (_watchdogTimer != null) { _watchdogTimer.Stop(); _watchdogTimer = null; } } catch { }
             try { if (_desktopIcons != null) { _desktopIcons.Restore(); _desktopIcons = null; } } catch (Exception ex) { Log("restore system desktop icons failed: " + ex.Message); }
             try { if (_engine != null) _engine.Shutdown(); } catch (Exception ex) { Log("engine shutdown error: " + ex.Message); }
             try { _store.Save(_config); } catch { }
@@ -327,6 +381,8 @@ namespace MultiDesk
             }
             catch { }
             Log("shutdown complete");
+            StartupProfiler.Mark("shutdown");
+            StartupProfiler.Flush();
             try { Application.Current.Shutdown(0); }
             catch { Environment.Exit(0); }
         }
@@ -373,6 +429,35 @@ namespace MultiDesk
             }
         }
 
+        /// <summary>
+        /// 1.2.8：延后 3 秒启动看门狗，避免登录瞬间第二个 WPF 进程与主进程争抢磁盘/CPU。
+        /// 主进程若在 3 秒内被强制结束，桌面图标 marker 会在下次启动时恢复（App.Run 开头），
+        /// 窗口恢复保护的空档也只有几秒。
+        /// </summary>
+        private void ScheduleWatchdogStart()
+        {
+            if (_engine == null) return;
+            try
+            {
+                _watchdogTimer = new DispatcherTimer(DispatcherPriority.Background);
+                _watchdogTimer.Interval = TimeSpan.FromSeconds(3.0);
+                _watchdogTimer.Tick += delegate
+                {
+                    try { _watchdogTimer.Stop(); }
+                    catch { }
+                    SpawnWatchdog();
+                    StartupProfiler.Mark("watchdog_spawned");
+                    StartupProfiler.Flush();
+                };
+                _watchdogTimer.Start();
+            }
+            catch (Exception ex)
+            {
+                Log("schedule watchdog failed: " + ex.Message);
+                SpawnWatchdog();
+            }
+        }
+
         private void SpawnWatchdog()
         {
             try
@@ -391,6 +476,79 @@ namespace MultiDesk
             {
                 Log("start watchdog failed: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// 1.2.8：清空图标缓存并重新提取当前桌面图标（托盘菜单「刷新桌面图标」）。
+        /// 通常不需要手动操作——目标文件 mtime/大小变化会自动失效；此入口用于极端情况。
+        /// </summary>
+        public void RefreshDesktopIcons()
+        {
+            try
+            {
+                IconService.ClearCache();
+                Log("icon cache cleared by user");
+            }
+            catch (Exception ex)
+            {
+                Log("clear icon cache failed: " + ex.Message);
+            }
+            try
+            {
+                if (_layer != null) _layer.RefreshSurface();
+            }
+            catch (Exception ex)
+            {
+                Log("refresh desktop icons failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 1.2.8：启动时先用上次缓存的 Windows 桌面图标度量（避免 explorer 忙时跨进程
+        /// SendMessage 卡住启动）；后台再读一次真实度量，仅更新缓存供下次启动使用，
+        /// 不重排当前会话图标（避免启动后图标突然跳动）。
+        /// </summary>
+        private void RefreshWindowsMetricsInBackground()
+        {
+            if (_uiOnly || _metricsRefreshScheduled) return;
+            if (_config == null || _config.Options == null || !_config.Options.MatchWindowsIconMetrics) return;
+            _metricsRefreshScheduled = true;
+            int fallbackSize = _config.Options.IconSize;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    IconMetrics live;
+                    if (!WindowsDesktopMetrics.TryGet(fallbackSize, out live) || live == null) return;
+                    IconMetrics current = _layoutMetrics;
+                    if (SameMetrics(current, live)) return;
+                    Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                    {
+                        try
+                        {
+                            Log("[icon-metrics] background refresh: Windows metrics changed; saved for next start (icon="
+                                + live.IconSize + ", cell=" + live.CellWidth.ToString("F1") + "x" + live.CellHeight.ToString("F1") + ")");
+                            RememberWindowsMetrics(live);
+                        }
+                        catch
+                        {
+                        }
+                    }));
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        private static bool SameMetrics(IconMetrics a, IconMetrics b)
+        {
+            if (a == null || b == null) return false;
+            return a.IconSize == b.IconSize
+                && Math.Abs(a.CellWidth - b.CellWidth) < 0.5
+                && Math.Abs(a.CellHeight - b.CellHeight) < 0.5
+                && Math.Abs(a.MarginX - b.MarginX) < 0.5
+                && Math.Abs(a.MarginY - b.MarginY) < 0.5;
         }
 
         // ---------------- 引擎事件 ----------------
@@ -537,10 +695,30 @@ namespace MultiDesk
         /// <summary>计算当前应使用的图标栅格：默认跟随真实 Windows 桌面，失败时使用上次缓存，最后回退默认。</summary>
         private IconMetrics ResolveIconMetrics()
         {
+            // 1.2.8：只有「本次启动的第一次解析」才优先用缓存（避免冷机登录风暴期
+            // explorer 忙时跨进程 SendMessage 拖慢启动）；之后（设置变更等）仍实时读取。
+            bool firstResolve = !_metricsResolvedOnce;
+            _metricsResolvedOnce = true;
             try
             {
                 if (_config != null && _config.Options != null && _config.Options.MatchWindowsIconMetrics)
                 {
+                    if (firstResolve)
+                    {
+                        IconMetrics cached = GetCachedWindowsMetrics();
+                        if (cached != null)
+                        {
+                            if (!_loggedIconMetrics)
+                            {
+                                _loggedIconMetrics = true;
+                                Log("[icon-metrics] use cached Windows metrics: icon=" + cached.IconSize
+                                    + " cell=" + cached.CellWidth.ToString("F1") + "x" + cached.CellHeight.ToString("F1")
+                                    + " origin=" + cached.MarginX.ToString("F1") + "," + cached.MarginY.ToString("F1")
+                                    + " (background refresh scheduled)");
+                            }
+                            return cached;
+                        }
+                    }
                     IconMetrics windowsMetrics;
                     if (WindowsDesktopMetrics.TryGet(_config.Options.IconSize, out windowsMetrics))
                     {
@@ -554,17 +732,15 @@ namespace MultiDesk
                         }
                         return windowsMetrics;
                     }
-                    IconMetrics cached = GetCachedWindowsMetrics();
-                    if (cached != null)
+                    IconMetrics fallbackCached = GetCachedWindowsMetrics();
+                    if (fallbackCached != null)
                     {
                         if (!_loggedIconMetrics)
                         {
                             _loggedIconMetrics = true;
-                            Log("[icon-metrics] use cached Windows metrics (restricted launch): icon=" + cached.IconSize
-                                + " cell=" + cached.CellWidth.ToString("F1") + "x" + cached.CellHeight.ToString("F1")
-                                + " origin=" + cached.MarginX.ToString("F1") + "," + cached.MarginY.ToString("F1"));
+                            Log("[icon-metrics] use cached Windows metrics (restricted launch): icon=" + fallbackCached.IconSize);
                         }
-                        return cached;
+                        return fallbackCached;
                     }
                 }
             }

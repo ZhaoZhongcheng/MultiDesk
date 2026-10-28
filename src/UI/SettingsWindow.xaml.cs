@@ -73,6 +73,7 @@ namespace MultiDesk.UI
         {
             _host = host;
             InitializeComponent();
+            ApplyVersionText();
 
             _page = SettingsPage.Desktops;
             _hotkeys = CreateHotkeyList();
@@ -94,6 +95,36 @@ namespace MultiDesk.UI
             _initialized = true;
             ShowPage(SettingsPage.Desktops);
             RefreshSettings();
+        }
+
+        /// <summary>
+        /// 1.2.8：左下角与「版本信息」的版本号改为从程序集版本动态读取。
+        /// 之前两处硬编码为 1.2.1，升级后界面仍显示旧版本号。
+        /// </summary>
+        private void ApplyVersionText()
+        {
+            string version = GetAppVersionText();
+            try { SidebarVersionText.Text = "版本 " + version; }
+            catch { }
+            try { VersionInfoText.Text = "多桌面助手 MultiDesk " + version; }
+            catch { }
+        }
+
+        private static string GetAppVersionText()
+        {
+            try
+            {
+                Version version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+                if (version != null)
+                {
+                    if (version.Build >= 0) return version.Major + "." + version.Minor + "." + version.Build;
+                    return version.Major + "." + version.Minor;
+                }
+            }
+            catch
+            {
+            }
+            return "未知";
         }
 
         // =====================================================================

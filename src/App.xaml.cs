@@ -38,14 +38,28 @@ namespace MultiDesk
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            // 1.2.8：启动阶段计时（写入数据目录 startup-perf.log），并启用多核 JIT 配置，
+            // 让后续启动的托管代码 JIT 并行化（.NET Framework 4.5+ 支持）。
+            MultiDesk.Core.StartupProfiler.Begin(e.Args);
+            try
+            {
+                string profileDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "MultiDesk-profile");
+                System.IO.Directory.CreateDirectory(profileDir);
+                System.Runtime.ProfileOptimization.SetProfileRoot(profileDir);
+                System.Runtime.ProfileOptimization.StartProfile("startup");
+            }
+            catch { }
             try
             {
                 System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "md-startup-trace.log"),
                     DateTime.Now.ToString("HH:mm:ss.fff") + " args=" + string.Join("|", e.Args) + Environment.NewLine);
             }
             catch { }
+            MultiDesk.Core.StartupProfiler.Mark("onstartup");
             base.OnStartup(e);
+            MultiDesk.Core.StartupProfiler.Mark("base_onstartup");
             try { MultiDesk.Core.FileUnblocker.UnblockSelfAndSiblings(); } catch { }
+            MultiDesk.Core.StartupProfiler.Mark("file_unblocked");
             AppDomain.CurrentDomain.UnhandledException += OnAppDomainException;
             DispatcherUnhandledException += OnDispatcherException;
             try
@@ -198,6 +212,10 @@ namespace MultiDesk
             }
             _dataDir = dataDir;
 
+            // 1.2.8：启动计时从这里开始能写入数据目录（之前的阶段先缓冲在内存里）。
+            MultiDesk.Core.StartupProfiler.Configure(dataDir);
+            MultiDesk.Core.StartupProfiler.Mark("datadir_resolved", dataDir);
+
             // 受限启动检测：以低完整性（聊天软件/沙箱/受限启动器）运行时，
             // 系统会禁止隐藏真实桌面图标、弹出原生桌面菜单、隐藏其它程序窗口。
             // 默认提示用户以完整权限重新启动；用户可在设置中关闭该提示（SkipRestrictedPrompt）。
@@ -285,6 +303,7 @@ namespace MultiDesk
                 Shutdown(0);
                 return;
             }
+            MultiDesk.Core.StartupProfiler.Mark("single_instance_ok");
 
             // 上次运行若异常退出，可能留下了「系统桌面图标被隐藏」的标记：先恢复。
             try
@@ -330,8 +349,11 @@ namespace MultiDesk
             {
             }
 
+            MultiDesk.Core.StartupProfiler.Mark("controller_create");
             _controller = new AppController(dataDir, uiOnly, showSettings, exitAfter, manageOnly, autoSwitchSpec, dataDirExplicit);
+            MultiDesk.Core.StartupProfiler.Mark("controller_created");
             _controller.Start();
+            MultiDesk.Core.StartupProfiler.Mark("controller_started");
             // Windows 11 默认把新托盘图标折叠进「隐藏的图标」；启动后延迟重试几次，
             // 等系统真正创建好 NotifyIconSettings 条目后再把它提升到任务栏显示。
             ScheduleTrayPromotion();
@@ -587,6 +609,7 @@ namespace MultiDesk
 
         protected override void OnExit(ExitEventArgs e)
         {
+            try { MultiDesk.Core.StartupProfiler.Mark("exit"); MultiDesk.Core.StartupProfiler.Flush(); } catch { }
             try
             {
                 if (_controller != null)

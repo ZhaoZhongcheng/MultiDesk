@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using MultiDesk.Core;
 using WinForms = System.Windows.Forms;
 
@@ -36,6 +37,23 @@ namespace MultiDesk.UI
 
         private static Icon LoadTrayIcon()
         {
+            // 1.2.8：优先从 exe 内嵌资源读取（冷启动时 ExtractAssociatedIcon 需要访问 exe 文件，
+            // 实测冷机可达 1 秒以上；内嵌资源已在进程映像里，读取几乎无成本）。
+            try
+            {
+                Stream stream = typeof(TrayIcon).Assembly.GetManifestResourceStream("MultiDesk.app.ico");
+                if (stream != null)
+                {
+                    using (stream)
+                    {
+                        Icon embedded = new Icon(stream);
+                        if (embedded != null) return embedded;
+                    }
+                }
+            }
+            catch
+            {
+            }
             try
             {
                 Icon icon = Icon.ExtractAssociatedIcon(AutoStart.ExecutablePath);
@@ -216,6 +234,12 @@ namespace MultiDesk.UI
                 restore.ShortcutKeyDisplayString = "Ctrl+Alt+Shift+R";
                 restore.Click += delegate { SafeInvoke(delegate { _controller.RestoreAllWindows(); }); };
                 _menu.Items.Add(restore);
+
+                // 1.2.8：图标现在有磁盘缓存，目标图标变了但 mtime 未变（极端情况）时可手动刷新。
+                WinForms.ToolStripMenuItem refreshIcons = new WinForms.ToolStripMenuItem("刷新桌面图标");
+                refreshIcons.ToolTipText = "清空图标缓存并重新提取当前桌面的图标";
+                refreshIcons.Click += delegate { SafeInvoke(delegate { _controller.RefreshDesktopIcons(); }); };
+                _menu.Items.Add(refreshIcons);
 
                 if (!_controller.IsDesktopIntegrationAvailable)
                 {

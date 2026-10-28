@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -70,6 +71,24 @@ namespace MultiDesk.UI
         private DesktopProfile _preparedDesktop;
         private int _preparedDesktopIndex = -1;
         private bool _realDesktopMode;
+
+        // ================= 后台图标加载（1.2.8） =================
+        // 启动时图标优先从磁盘缓存同步绘制；未命中的图标由这个后台 STA 线程逐个提取并回填，
+        // 避免在 UI 线程上同步调用 Shell 导致「桌面空白 + 托盘迟迟不出现」。
+        private sealed class IconLoadRequest
+        {
+            public string IconId;
+            public string TargetPath;
+            public int PixelSize;
+            public int Generation;
+        }
+
+        private readonly object _iconLoadLock = new object();
+        private readonly List<IconLoadRequest> _iconLoadQueue = new List<IconLoadRequest>();
+        private AutoResetEvent _iconLoadSignal;
+        private Thread _iconLoaderThread;
+        private volatile bool _iconLoaderStop;
+        private volatile int _iconLoadGeneration;
 
         public DesktopLayerWindow(IAppHost host)
         {
@@ -142,6 +161,7 @@ namespace MultiDesk.UI
         {
             try
             {
+                StopIconLoader();
                 _bottomTimer.Stop();
                 _toastTimer.Stop();
                 _menuWatchTimer.Stop();
@@ -743,6 +763,10 @@ namespace MultiDesk.UI
                 IconCanvas.Children.Clear();
                 _iconViews.Clear();
 
+                // 新的一轮图标渲染：作废旧的后台加载请求（切换桌面/刷新时快速失效）。
+                int generation = ++_iconLoadGeneration;
+                lock (_iconLoadLock) { _iconLoadQueue.Clear(); }
+
                 DesktopProfile desktop = GetDisplayDesktop();
                 IconMetrics metrics = GetIconMetrics();
                 _iconMetrics = metrics;
@@ -760,6 +784,8 @@ namespace MultiDesk.UI
                     NormalizeIconsForCurrentMetrics(desktop, !firstLayout);
                 }
 
+                int pixelSize = IconPixelSizeFor(metrics);
+                List<IconLoadRequest> pendingLoads = new List<IconLoadRequest>();
                 Rect area = LayoutArea;
                 for (int i = 0; i < desktop.Icons.Count; i++)
                 {
@@ -777,7 +803,13 @@ namespace MultiDesk.UI
                         y = area.Y + metrics.MarginY + (i / 8) * metrics.CellHeight;
                     }
 
-                    DesktopLayerIconView view = new DesktopLayerIconView(icon, metrics);
+                    // 1.2.8：先同步读内存/磁盘缓存（毫秒级），命中的图标立即显示；
+                    // 未命中的先显示占位图，交给后台线程提取后回填，避免阻塞启动。
+                    ImageSource cachedIcon = null;
+                    try { cachedIcon = IconService.TryGetCachedIcon(icon, pixelSize); }
+                    catch { cachedIcon = null; }
+
+                    DesktopLayerIconView view = new DesktopLayerIconView(icon, metrics, cachedIcon, true);
                     Canvas.SetLeft(view, x);
                     Canvas.SetTop(view, y);
                     Panel.SetZIndex(view, 10);
@@ -791,16 +823,156 @@ namespace MultiDesk.UI
                     {
                         _iconViews.Add(icon.Id, view);
                     }
+                    if (cachedIcon == null && !string.IsNullOrEmpty(icon.Id) && !string.IsNullOrEmpty(icon.TargetPath))
+                    {
+                        IconLoadRequest request = new IconLoadRequest();
+                        request.IconId = icon.Id;
+                        request.TargetPath = icon.TargetPath;
+                        request.PixelSize = pixelSize;
+                        request.Generation = generation;
+                        pendingLoads.Add(request);
+                    }
                 }
 
                 if (!string.IsNullOrEmpty(_selectedIconId) && !_iconViews.ContainsKey(_selectedIconId))
                 {
                     _selectedIconId = null;
                 }
+
+                QueueIconLoads(pendingLoads);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine("[DesktopLayer] 图标渲染失败: " + ex);
+            }
+        }
+
+        private static int IconPixelSizeFor(IconMetrics metrics)
+        {
+            // 按图标显示尺寸的 2 倍取图，保证高分屏下清晰
+            int iconSize = metrics == null ? 48 : metrics.IconSize;
+            int pixelSize = (int)Math.Round(iconSize * 2.0);
+            if (pixelSize < 48) pixelSize = 48;
+            return pixelSize;
+        }
+
+        private void QueueIconLoads(List<IconLoadRequest> requests)
+        {
+            if (requests == null || requests.Count == 0) return;
+            EnsureIconLoader();
+            lock (_iconLoadLock)
+            {
+                for (int i = 0; i < requests.Count; i++) _iconLoadQueue.Add(requests[i]);
+            }
+            AutoResetEvent signal = _iconLoadSignal;
+            if (signal != null) signal.Set();
+        }
+
+        private void EnsureIconLoader()
+        {
+            lock (_iconLoadLock)
+            {
+                if (_iconLoaderThread != null) return;
+                _iconLoaderStop = false;
+                _iconLoadSignal = new AutoResetEvent(false);
+                _iconLoaderThread = new Thread(IconLoaderLoop);
+                _iconLoaderThread.IsBackground = true;
+                _iconLoaderThread.Name = "MultiDesk.IconLoader";
+                try { _iconLoaderThread.SetApartmentState(ApartmentState.STA); }
+                catch { }
+                _iconLoaderThread.Start();
+            }
+        }
+
+        private void StopIconLoader()
+        {
+            try
+            {
+                lock (_iconLoadLock)
+                {
+                    _iconLoaderStop = true;
+                    AutoResetEvent signal = _iconLoadSignal;
+                    if (signal != null) signal.Set();
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// 后台图标加载线程：串行调用 Shell 提取图标，完成后回 UI 线程回填。
+        /// 每次 RebuildIcons 会递增 generation，旧请求的结果会被丢弃（切换桌面/刷新时不会串图）。
+        /// </summary>
+        private void IconLoaderLoop()
+        {
+            while (true)
+            {
+                IconLoadRequest request = null;
+                try
+                {
+                    lock (_iconLoadLock)
+                    {
+                        if (_iconLoaderStop) return;
+                        if (_iconLoadQueue.Count > 0)
+                        {
+                            request = _iconLoadQueue[0];
+                            _iconLoadQueue.RemoveAt(0);
+                        }
+                    }
+                }
+                catch
+                {
+                    return;
+                }
+
+                if (request == null)
+                {
+                    AutoResetEvent signal = _iconLoadSignal;
+                    if (signal == null) return;
+                    try { signal.WaitOne(2000); }
+                    catch { return; }
+                    continue;
+                }
+
+                if (request.Generation != _iconLoadGeneration) continue;
+
+                ImageSource source = null;
+                try { source = IconService.ExtractIcon(request.TargetPath, request.PixelSize); }
+                catch { source = null; }
+                if (source == null) continue;
+
+                IconLoadRequest appliedRequest = request;
+                ImageSource appliedSource = source;
+                try
+                {
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                    {
+                        ApplyLoadedIcon(appliedRequest, appliedSource);
+                    }));
+                }
+                catch
+                {
+                    return;
+                }
+            }
+        }
+
+        private void ApplyLoadedIcon(IconLoadRequest request, ImageSource source)
+        {
+            try
+            {
+                if (request == null || source == null) return;
+                if (request.Generation != _iconLoadGeneration) return;
+                DesktopLayerIconView view;
+                if (_iconViews.TryGetValue(request.IconId, out view) && view != null)
+                {
+                    view.SetIconSource(source);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("[DesktopLayer] 回填图标失败: " + ex.Message);
             }
         }
 

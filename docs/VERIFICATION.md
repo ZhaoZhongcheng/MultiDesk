@@ -479,3 +479,22 @@ MultiDesk 1.0.0 的核心引擎、配置/布局逻辑、桌面图层与设置窗
 4. 版本 1.2.7。
 
 验证：给测试副本手动写入 `Zone.Identifier`（MOTW before=True）→ 运行程序（`--selftest`）后标记被自动删除（MOTW after=False）；Release 构建/单测 127/127、dist 冒烟+selftest 28/28。
+
+---
+
+## 21. 1.2.8 启动性能优化验证（2026-10-28）
+
+背景：用户反馈开机自启慢。定位到 1.2.7 启动关键路径在 UI 线程同步调用 Shell 提取当前桌面全部图标（冷机单个图标可达数百毫秒），且托盘图标排在最后创建。1.2.8 的改动与原理见 [`docs/STARTUP-PERF.md`](STARTUP-PERF.md) 与 [CHANGELOG 1.2.8](../CHANGELOG.md)。
+
+验证：
+
+1. `build.ps1 -Tests`：Debug 构建成功、单元测试 **134/134 通过**（新增 7 个图标缓存用例：写入/读取、不同尺寸隔离、目标文件变化失效、Clear、key 稳定性、Prune、30 天过期）。
+2. Release 构建：`build.ps1 -Release` 成功。
+3. 受控启动（独立临时数据目录 + `--manage-only=__none__` + `--no-integrity-elevation`，避免影响真实窗口）：
+   - 续启动（66 个图标已有磁盘缓存）：`startup-perf.log` 显示托盘可见 62 ms、桌面图层 505 ms、启动流程结束 514 ms；看门狗按预期在 +3 秒启动；退出正常无残留。
+   - 首次启动（空缓存、导入真实桌面 66 个图标）：托盘 136 ms、图层 540 ms；图标在后台逐个提取（首个慢图标记录 `icon_shell_slow` 207 ms），不阻塞托盘/图层；缓存目录生成 PNG。
+4. 图标缓存失效：复制目标文件并修改 mtime 后自动 miss（单元测试覆盖）；托盘菜单「刷新桌面图标」可清空重建。
+5. 托盘图标内嵌资源：确认 `MultiDesk.exe` 资源中存在 `MultiDesk.app.ico`（Reflection 枚举 manifest resource）。
+6. 版本显示（用户反馈修复）：设置窗口左下角与「版本信息」不再硬编码，改为读取程序集版本；Release exe 的 AssemblyVersion 为 1.2.8.0，界面显示 `版本 1.2.8` / `多桌面助手 MultiDesk 1.2.8`。
+
+说明：冷启动（开机登录后第一次）受系统登录风暴影响，自动化环境无法复现，需在真实重启后按 `docs/STARTUP-PERF.md` 的步骤用 `startup-perf.log` 的 `uptime_s` 校验；1.2.7 的对照数据来自用户机器 app.log（12.43 s / 14.89 s / 2.02 s）。

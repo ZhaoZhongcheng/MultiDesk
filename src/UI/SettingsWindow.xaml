@@ -260,8 +260,8 @@
                             </Button>
                         </StackPanel>
 
-                        <!-- 版本号 -->
-                        <TextBlock Grid.Row="6" Text="版本 1.2.1" FontSize="10.5"
+                        <!-- 版本号（1.2.8 起从程序集版本动态读取，见 SettingsWindow.ApplyVersionText） -->
+                        <TextBlock x:Name="SidebarVersionText" Grid.Row="6" Text="版本" FontSize="10.5"
                                    Foreground="{StaticResource TextMutedBrush}" Margin="12,10,0,0"/>
                     </Grid>
                 </Border>
@@ -713,7 +713,7 @@
                                 <Border Style="{StaticResource CardStyle}">
                                     <StackPanel>
                                         <TextBlock Text="版本信息" Style="{StaticResource CardTitleStyle}"/>
-                                        <TextBlock Text="多桌面助手 MultiDesk 1.2.1" FontSize="13"
+                                        <TextBlock x:Name="VersionInfoText" Text="多桌面助手 MultiDesk" FontSize="13"
                                                    Foreground="{StaticResource TextBrush}" Margin="0,0,0,5"/>
                                         <TextBlock Text="运行环境：Windows 10 / 11 · .NET Framework 4.8 · WPF"
                                                    Style="{StaticResource CaptionTextStyle}" Margin="0,0,0,3"/>

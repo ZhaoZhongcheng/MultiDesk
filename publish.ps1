@@ -13,7 +13,7 @@
 #   * This script is saved as UTF-8 with BOM because Windows PowerShell 5.1
 #     misreads BOM-less UTF-8 sources that contain non-ASCII characters.
 param(
-    [string]$Version = '1.2.7',
+    [string]$Version = '',
     [switch]$SkipBuild,
     [switch]$NoZip
 )
@@ -22,6 +22,18 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 if (-not $root) { $root = (Get-Location).Path }
 Write-Host "[publish] project root: $root"
+
+# 版本号默认从 src\AssemblyInfo.cs 的 AssemblyVersion 读取（避免忘记同步发布版本号）；
+# 也可以用 -Version 1.2.8 显式覆盖。
+if (-not $Version) {
+    $assemblyInfo = Join-Path $root 'src\AssemblyInfo.cs'
+    if (Test-Path $assemblyInfo) {
+        $match = [regex]::Match([System.IO.File]::ReadAllText($assemblyInfo), 'AssemblyVersion\("(\d+\.\d+\.\d+)')
+        if ($match.Success) { $Version = $match.Groups[1].Value }
+    }
+    if (-not $Version) { $Version = '0.0.0' }
+}
+Write-Host "[publish] version: $Version"
 
 if (-not $SkipBuild) {
     Write-Host '[publish] running Release build (build.ps1 -Release)...'

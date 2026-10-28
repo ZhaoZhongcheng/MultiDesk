@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6)
 ![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4)
-[![Version](https://img.shields.io/badge/version-1.2.7-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.8-orange.svg)](CHANGELOG.md)
 [![AI-Assisted](https://img.shields.io/badge/development-AI--assisted-8A2BE2)](#13-ai-辅助开发声明)
 
 > Windows 多虚拟桌面管理工具：每个桌面拥有**独立的桌面图标集合**和**独立壁纸**。
@@ -37,6 +37,7 @@
 - **受限启动自动恢复完整功能（1.2.1）**：若之前在受限提示中选择过「否」（不再提示）且开启了「受限启动时自动以完整权限重启」（默认开启），下次从聊天软件/沙箱启动时会**直接弹出 Windows UAC 以完整权限重启**（只弹系统 UAC，不再弹程序自己的提示框）；取消 UAC 则静默回退受限模式。设置 →「常规设置」可关闭自动提权或重新开启受限提示。
 - **托盘图标不再被折叠（1.2.1）**：启动时把 Windows 11 通知区域的图标设为「始终显示」（`IsPromoted=1` + `SHChangeNotify`），不用再手动从托盘溢出区拖出。
 - **受限模式图标外观兜底（1.2.1）**：读不到真实 Windows 桌面度量时使用上次缓存的值；无缓存时回退到与 Windows 一致的实测常量（图标 48、栅格 76.67×98、原点 0,3.33），不会退回旧的偏大 96×104 栅格。
+- **启动更快、图标不阻塞启动（1.2.8）**：先出托盘/热键，再加载桌面图层；图标位图缓存到数据目录的 `icon-cache-v1\`，续启动直接读缓存，未命中项在后台提取并回填；看门狗延迟 3 秒启动、托盘图标改用内嵌资源、Windows 图标度量缓存优先。启动阶段可用 `startup-perf.log` 查看（详见 [docs/STARTUP-PERF.md](docs/STARTUP-PERF.md)）；图标显示异常时托盘右键 →「刷新桌面图标」可重建缓存。
 - **切换桌面不影响程序运行**：切换时把非当前桌面的窗口隐藏（`ShowWindow(SW_HIDE)`），把目标桌面的窗口恢复显示；进程始终在运行，游戏、编译、下载等任务不会中断。
 - **新窗口自动归属**：切换到某桌面后新打开的窗口自动归属当前桌面；带 owner 的对话框跟随主窗口；同一程序的新窗口跟随该程序上一次所在的桌面。
 - **全局快捷键**：`Ctrl+Alt+数字` 直接切换桌面，`Ctrl+Alt+方向键` 前后切换，另支持把当前窗口移动到其它桌面。
@@ -205,6 +206,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File publish.ps1
 - 每当引擎隐藏窗口时，会把被隐藏窗口的句柄、进程 ID、进程启动时间、桌面归属等写入会话日志 `session.json`（位于数据目录）。
 - 正常退出时先恢复所有窗口并清空会话日志。
 - 如果不是正常退出（崩溃/被强杀），由随主进程启动的看门狗子进程（`--watchdog`）在主进程退出后读取会话日志，校验句柄与进程 ID 后把窗口恢复显示。
+- 1.2.8 起看门狗改为**启动完成 3 秒后**再拉起（避免登录瞬间第二个 WPF 进程和主进程争抢磁盘/CPU）；这几秒内若主进程被强杀，桌面图标 marker 会在下次启动时恢复，窗口恢复保护的缺口只有数秒。
 - 会话日志带「本次开机」标记，重启电脑后不会误恢复上一次开机的旧句柄。
 
 ### 4.3 配置与数据
@@ -224,6 +226,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File publish.ps1
 | `config.json` | 桌面、图标、壁纸、选项等全部配置（UTF-8 JSON） |
 | `config.json.bak` | 上一次保存的备份（配置损坏时自动回退） |
 | `app.log` | 启动/切换/错误等运行日志 |
+| `startup-perf.log` | 启动阶段计时（1.2.8 起；每次启动一组，含系统 uptime，用于排查开机自启慢） |
+| `icon-cache-v1\` | 桌面图标位图磁盘缓存（1.2.8 起；可安全删除，删除后下次启动会重新提取） |
 | `crash.log` | 崩溃日志（如有） |
 | `session.json` | 会话日志（被隐藏窗口，用于崩溃恢复；正常情况下为空/不存在） |
 
@@ -276,6 +280,8 @@ MultiDesk/
 │  ├─ Core/                      核心逻辑（可单元测试，不依赖 UI）
 │  │  ├─ Models.cs               配置数据模型（桌面/图标/选项）
 │  │  ├─ ConfigStore.cs          config.json 读写与备份恢复
+│  │  ├─ IconCacheStore.cs       图标位图磁盘缓存（1.2.8）
+│  │  ├─ StartupProfiler.cs      启动阶段计时，写 startup-perf.log（1.2.8）
 │  │  ├─ IconLayout.cs           桌面图标栅格布局（吸附/碰撞/规整）
 │  │  ├─ DesktopEngine.cs        桌面引擎：窗口归属、隐藏/恢复、会话日志
 │  │  ├─ IWindowSystem.cs        窗口系统抽象 + 会话日志模型 + 日志恢复器
@@ -299,11 +305,12 @@ MultiDesk/
 │     ├─ TrayIcon.cs             托盘图标与菜单
 │     ├─ HotkeyManager.cs        全局快捷键
 │     ├─ WallpaperService.cs     壁纸加载与缓存
-│     ├─ IconService.cs          系统图标提取（Shell API）
+│     ├─ IconService.cs          系统图标提取（Shell API）+ 内存/磁盘缓存（1.2.8）
 │     └─ SettingsModels.cs / Theme.xaml
 ├─ tests/                       控制台单元测试（自写断言/运行器，无第三方包）
 ├─ scripts/                     E2E / 截图 / 自测辅助脚本
 ├─ docs/VERIFICATION.md         验证记录（环境、命令、截图、结论）
+├─ docs/STARTUP-PERF.md         启动性能说明与 startup-perf.log 使用方式（1.2.8）
 ├─ screenshots/                 本地开发/验证截图（不纳入版本库）
 ├─ assets/                      应用图标等资源
 ├─ dist/                        发布产物（publish.ps1 生成，不纳入版本库）
@@ -349,7 +356,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File publish.ps1
 - 单元测试位于 `tests/`，使用自写的最小测试运行器（用例注册 + 断言 + PASS/FAIL + 汇总 + 失败退出码），**不依赖任何第三方 NuGet 包**，也无需联网；
 - E2E / 截图辅助脚本位于 `scripts/`，用法见 `docs/VERIFICATION.md`；
 - **持续集成**：GitHub Actions 在每次 push / Pull Request 时自动执行 `build.ps1 -Release -Tests`（见 [`.github/workflows/build.yml`](.github/workflows/build.yml)），构建或测试失败会直接标红；
-- 整理仓库时的验证结果：Release 构建成功，单元测试 **127/127 通过**；`--selftest` / `--ui-only` 端到端验证记录见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md)。
+- 整理仓库时的验证结果：Release 构建成功，单元测试 **134/134 通过**；`--selftest` / `--ui-only` 端到端验证记录见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md)；1.2.8 启动性能验证见 [`docs/STARTUP-PERF.md`](docs/STARTUP-PERF.md)。
 
 ---
 
@@ -394,6 +401,9 @@ A：如果 MultiDesk 是以**管理员权限**启动的，根据 Windows 的 UIP
 **Q10：勾选「开机自动启动」失败/不生效？**
 A：开机自启通过写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 实现。部分企业组策略、安全软件或系统优化工具会禁止写入该注册表项，此时设置会失败（程序会提示）。可改用「任务计划程序」或「启动」文件夹放置快捷方式实现开机启动。
 
+**Q12：开机自启后，为什么托盘/桌面图标要过一会儿才出现？**
+A：1.2.8 已把托盘和热键放到启动最前面（通常 1 秒内出现），桌面图标会先显示占位图、再在后台逐个补齐（续启动读磁盘缓存后基本瞬间完成）。第一次启动或删除过 `icon-cache-v1\` 后，需要重新调用 Shell 提取图标，冷机下会多花 1~3 秒补图标，但**不再阻塞启动和托盘出现**。若想确认每次启动各阶段耗时，可查看数据目录下的 `startup-perf.log`（说明见 [docs/STARTUP-PERF.md](docs/STARTUP-PERF.md)）。
+
 ---
 
 ## 9. 限制与注意事项
@@ -417,7 +427,12 @@ A：开机自启通过写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVe
 
 ## 10. 版本
 
-- 当前版本：**1.2.7**（2026-10-26）
+- 当前版本：**1.2.8**（2026-10-28）
+  - 优化：启动顺序重排（托盘/热键前置）；图标位图磁盘缓存（`icon-cache-v1`）+ 异步加载；看门狗延迟 3 秒启动；托盘图标改用 exe 内嵌资源；Windows 图标度量缓存优先 + 后台刷新；启动阶段合并写盘 + 多核 JIT；首次运行设置窗口延迟打开
+  - 新增：启动阶段计时日志 `startup-perf.log`（见 [docs/STARTUP-PERF.md](docs/STARTUP-PERF.md)）；托盘菜单「刷新桌面图标」
+  - 新增：单元测试覆盖图标缓存（共 134 个测试全部通过）
+  - 说明：首次启动仍会真实调用 Shell 提取图标（已移到后台，不阻塞启动）；续启动直接读缓存
+- 1.2.7（2026-10-26）
   - 新增：受限启动时若已选择「不再提示」且开启自动提权（默认），直接弹 Windows UAC 以完整权限重启；取消 UAC 静默回退受限模式（`AutoElevateWhenRestricted`，配置 v4 自动迁移为 true）
   - 新增：启动时把 Windows 11 托盘图标设为「始终显示」（`IsPromoted=1` + `SHChangeNotify`）
   - 修复：受限模式读不到真实桌面度量时优先用缓存；无缓存回退 Windows 一致常量（图标 48、76.67×98、原点 0,3.33），不再退回旧的 96×104 偏大栅格
@@ -449,7 +464,7 @@ A：开机自启通过写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVe
 
 - **AI 参与的部分**：需求梳理与方案讨论、C# / WPF 代码生成与重构、单元测试与验证脚本编写、README / CHANGELOG 等文档撰写、发布打包流程。
 - **维护者负责的部分**：确定产品方向与需求、审阅并验收 AI 产出、在真实 Windows 环境中运行测试与截图验证、决定版本发布。
-- **质量说明**：代码附有自写单元测试（127 个）和验证记录（[docs/VERIFICATION.md](docs/VERIFICATION.md)），但 AI 辅助开发的代码仍可能存在疏漏或未覆盖的边界情况，欢迎通过 [Issues](../../issues) 反馈。
+- **质量说明**：代码附有自写单元测试（134 个）和验证记录（[docs/VERIFICATION.md](docs/VERIFICATION.md)），但 AI 辅助开发的代码仍可能存在疏漏或未覆盖的边界情况，欢迎通过 [Issues](../../issues) 反馈。
 - **许可证不受影响**：本项目以 [MIT License](LICENSE) 开源，此声明不影响该许可证授予你的任何权利。
 
 > 说明：AI 辅助开发不等于“无人负责”。代码与发布由维护者确认；引用、转载或二次开发时，请同时遵守 [MIT License](LICENSE)。

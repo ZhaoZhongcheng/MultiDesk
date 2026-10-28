@@ -69,6 +69,16 @@ namespace MultiDesk.UI
         }
 
         public DesktopLayerIconView(IconEntry entry, IconMetrics metrics)
+            : this(entry, metrics, null, false)
+        {
+        }
+
+        /// <summary>
+        /// 1.2.8 新增：支持「先用占位图、后台提取完成后再回填」。
+        /// initialIcon 非空时直接使用（来自内存/磁盘缓存）；deferIconLoad=true 且 initialIcon 为空时
+        /// 不调用 Shell，由 DesktopLayerWindow 的后台图标加载线程稍后调用 SetIconSource 回填。
+        /// </summary>
+        public DesktopLayerIconView(IconEntry entry, IconMetrics metrics, ImageSource initialIcon, bool deferIconLoad)
         {
             Entry = entry;
             _metrics = metrics != null ? metrics : IconLayout.Default;
@@ -165,7 +175,7 @@ namespace MultiDesk.UI
             MouseEnter += OnMouseEnterSelf;
             MouseLeave += OnMouseLeaveSelf;
 
-            ApplyContent();
+            ApplyContent(initialIcon, deferIconLoad);
         }
 
         // ================= 状态 =================
@@ -219,7 +229,61 @@ namespace MultiDesk.UI
             }
         }
 
-        private void ApplyContent()
+        private void ApplyContent(ImageSource initialIcon, bool deferIconLoad)
+        {
+            string name = GetDisplayName();
+            _label.Text = name;
+            _labelShadow.Text = name;
+
+            ImageSource source = initialIcon;
+            if (source == null && !deferIconLoad)
+            {
+                try
+                {
+                    // 按图标显示尺寸的 2 倍取图，保证高分屏下清晰
+                    int pixelSize = (int)Math.Round(_metrics.IconSize * 2.0);
+                    if (pixelSize < 48) pixelSize = 48;
+                    source = IconService.GetIconForEntry(Entry, pixelSize);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("[DesktopLayerIconView] 提取图标失败: " + ex.Message);
+                }
+            }
+            SetIconSource(source);
+        }
+
+        /// <summary>
+        /// 设置图标位图（必须在 UI 线程调用）。source 为 null 时显示「名称首字」占位图；
+        /// 后台图标加载完成后由 DesktopLayerWindow 调用本方法回填。
+        /// </summary>
+        public void SetIconSource(ImageSource source)
+        {
+            try
+            {
+                if (source != null)
+                {
+                    _image.Source = source;
+                    _image.Visibility = Visibility.Visible;
+                    _placeholder.Visibility = Visibility.Collapsed;
+                }
+                else
+                {
+                    string name = GetDisplayName();
+                    _image.Source = null;
+                    _image.Visibility = Visibility.Collapsed;
+                    _placeholder.Background = CreatePlaceholderBrush(name);
+                    _placeholderText.Text = FirstVisibleChar(name);
+                    _placeholder.Visibility = Visibility.Visible;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[DesktopLayerIconView] 设置图标失败: " + ex.Message);
+            }
+        }
+
+        private string GetDisplayName()
         {
             string name = null;
             string target = null;
@@ -229,37 +293,7 @@ namespace MultiDesk.UI
                 target = Entry.TargetPath;
             }
             if (string.IsNullOrEmpty(name)) name = string.IsNullOrEmpty(target) ? "图标" : target;
-
-            _label.Text = name;
-            _labelShadow.Text = name;
-
-            ImageSource source = null;
-            try
-            {
-                // 按图标显示尺寸的 2 倍取图，保证高分屏下清晰
-                int pixelSize = (int)Math.Round(_metrics.IconSize * 2.0);
-                if (pixelSize < 48) pixelSize = 48;
-                source = IconService.GetIconForEntry(Entry, pixelSize);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("[DesktopLayerIconView] 提取图标失败: " + ex.Message);
-            }
-
-            if (source != null)
-            {
-                _image.Source = source;
-                _image.Visibility = Visibility.Visible;
-                _placeholder.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                _image.Source = null;
-                _image.Visibility = Visibility.Collapsed;
-                _placeholder.Background = CreatePlaceholderBrush(name);
-                _placeholderText.Text = FirstVisibleChar(name);
-                _placeholder.Visibility = Visibility.Visible;
-            }
+            return name;
         }
 
         private static TextBlock CreateLabel(bool shadow, double labelWidth)
